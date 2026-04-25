@@ -11,13 +11,24 @@ Full pipeline per query:
 
 import pickle
 import numpy as np
+import hnswlib
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 
 EMBED_CACHE = Path(__file__).parent / "ad_embeddings.pkl"
+HNSW_CACHE  = Path(__file__).parent / "ad_index.bin"
 MODEL_NAME  = "all-MiniLM-L6-v2"
+EMBED_DIM   = 384
+
+# HNSW index parameters
+# M              : edges per node per layer — higher = better recall, more memory
+# ef_construction: neighbor search breadth during insert — higher = better graph, slower build
+# ef_search      : neighbor search breadth at query time — tune up for higher recall
+HNSW_M               = 16
+HNSW_EF_CONSTRUCTION = 200
+HNSW_EF_SEARCH       = 50
 
 
 # ─── Ad Catalog ───────────────────────────────────────────────────────────────
@@ -134,7 +145,7 @@ class EmbeddingModel:
     def __init__(self):
         print(f"  Loading {MODEL_NAME}...", end=" ", flush=True)
         self.model = SentenceTransformer(MODEL_NAME)
-        dim = self.model.get_sentence_embedding_dimension()
+        dim = self.model.get_embedding_dimension()
         print(f"OK  ({dim}-dim vectors)")
 
     def embed(self, text: str) -> np.ndarray:
@@ -144,7 +155,8 @@ class EmbeddingModel:
         return self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
 
 
-def load_ad_embeddings(model: EmbeddingModel) -> List[Ad]:
+def load_ad_embeddings(model: EmbeddingModel) -> Tuple[List[Ad], hnswlib.Index]:
+    # ── Step 1: embeddings ────────────────────────────────────────────────────
     if EMBED_CACHE.exists():
         print(f"  Loading cached ad embeddings...", end=" ", flush=True)
         with open(EMBED_CACHE, "rb") as f:
@@ -160,8 +172,35 @@ def load_ad_embeddings(model: EmbeddingModel) -> List[Ad]:
             ad.embedding = emb
         with open(EMBED_CACHE, "wb") as f:
             pickle.dump(embeddings, f)
-        print("OK  (cached to ad_embeddings.pkl)")
-    return AD_CATALOG
+        print("OK  (cached)")
+
+    # ── Step 2: HNSW index ────────────────────────────────────────────────────
+    # Vectors are L2-normalized so inner product == cosine similarity.
+    # Space "ip" (inner product) is faster than "cosine" for pre-normalized vecs.
+    index = hnswlib.Index(space="ip", dim=EMBED_DIM)
+
+    if HNSW_CACHE.exists():
+        print(f"  Loading cached HNSW index...", end=" ", flush=True)
+        index.load_index(str(HNSW_CACHE), max_elements=len(AD_CATALOG))
+        index.set_ef(HNSW_EF_SEARCH)
+        print("OK")
+    else:
+        print(f"  Building HNSW index  "
+              f"(M={HNSW_M}, ef_construction={HNSW_EF_CONSTRUCTION})...",
+              end=" ", flush=True)
+        index.init_index(
+            max_elements=len(AD_CATALOG),
+            M=HNSW_M,
+            ef_construction=HNSW_EF_CONSTRUCTION,
+        )
+        # Each ad's integer label = its position in AD_CATALOG
+        embeddings = np.stack([ad.embedding for ad in AD_CATALOG])
+        index.add_items(embeddings, ids=list(range(len(AD_CATALOG))))
+        index.set_ef(HNSW_EF_SEARCH)
+        index.save_index(str(HNSW_CACHE))
+        print("OK  (cached)")
+
+    return AD_CATALOG, index
 
 
 # ─── Stage 1: Vector Matching ─────────────────────────────────────────────────
@@ -171,19 +210,33 @@ RELEVANCE_THRESHOLD = 0.28
 def match_candidates(
     query_emb: np.ndarray,
     ads: List[Ad],
+    index: hnswlib.Index,
     threshold: float = RELEVANCE_THRESHOLD,
 ) -> List[Tuple[Ad, float]]:
     """
-    Dot product between normalized vectors = cosine similarity.
-    Filters out ads with exhausted budgets.
+    ANN search via HNSW index.
+
+    knn_query returns the k approximate nearest neighbors by navigating the
+    graph — O(log n) vs O(n) brute force. Labels are AD_CATALOG positions.
+    Similarities are inner products (== cosine sim for normalized vectors).
+
+    Budget-exhausted ads still appear in the index; we filter them out here
+    after retrieval. In production you'd rebuild or soft-delete from the index.
     """
+    k = min(len(ads), 15)   # retrieve top-15, then threshold-filter
+    labels, distances = index.knn_query(query_emb.reshape(1, -1), k=k)
+
     candidates = []
-    for ad in ads:
+    for label, dist in zip(labels[0], distances[0]):
+        ad  = ads[int(label)]
+        # hnswlib "ip" space returns 1 - inner_product as distance, so flip it
+        sim = round(1.0 - float(dist), 4)
+        if sim < threshold:
+            continue
         if ad.daily_spend >= ad.daily_budget:
             continue
-        sim = float(np.dot(query_emb, ad.embedding))
-        if sim >= threshold:
-            candidates.append((ad, round(sim, 4)))
+        candidates.append((ad, sim))
+
     return sorted(candidates, key=lambda x: x[1], reverse=True)
 
 
@@ -302,7 +355,7 @@ class AdPipeline:
     def __init__(self):
         print("\n[ Ad Network Pipeline ] Initializing\n")
         self.embed_model = EmbeddingModel()
-        self.ads         = load_ad_embeddings(self.embed_model)
+        self.ads, self.index = load_ad_embeddings(self.embed_model)
         self.fatigue     = FatigueTracker()
         self.query_n     = 0
         self._rng        = np.random.default_rng(0)
@@ -318,7 +371,7 @@ class AdPipeline:
 
         # ── Stage 1: embed + match ──────────────────────────────────────────
         q_emb      = self.embed_model.embed(query)
-        candidates = match_candidates(q_emb, self.ads)
+        candidates = match_candidates(q_emb, self.ads, self.index)
 
         print(f"\n  STAGE 1 · Embedding + Vector Matching")
         print(f"  Cosine similarity threshold: {RELEVANCE_THRESHOLD}")
