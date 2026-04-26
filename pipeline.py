@@ -13,7 +13,7 @@ import pickle
 import numpy as np
 import hnswlib
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
+from typing import List, Tuple, Optional
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 
@@ -240,27 +240,7 @@ def match_candidates(
     return sorted(candidates, key=lambda x: x[1], reverse=True)
 
 
-# ─── Stage 2: Ad Fatigue ──────────────────────────────────────────────────────
-
-class FatigueTracker:
-    """
-    Per-session frequency counter. Each time an ad wins an impression,
-    its future score is discounted — simulates user banner blindness / annoyance.
-    """
-    DECAY_PER_EXPOSURE = 0.20   # 20% score penalty per prior impression
-
-    def __init__(self):
-        self.counts: Dict[str, int] = {}
-
-    def factor(self, ad_id: str) -> float:
-        freq = self.counts.get(ad_id, 0)
-        return round(max(0.05, 1.0 - self.DECAY_PER_EXPOSURE * freq), 3)
-
-    def record(self, ad_id: str):
-        self.counts[ad_id] = self.counts.get(ad_id, 0) + 1
-
-
-# ─── Stage 3: DLRM-style Scorer ──────────────────────────────────────────────
+# ─── Stage 2: DLRM-style Scorer ──────────────────────────────────────────────
 
 @dataclass
 class AdScore:
@@ -269,13 +249,11 @@ class AdScore:
     p_ctr:         float   # predicted click-through rate
     p_cvr:         float   # predicted conversion rate (given click)
     exp_value:     float   # p_cvr × avg_order_value  ($)
-    fatigue:       float   # fatigue multiplier (1.0 = no penalty)
     effective_bid: float   # what goes into the auction
 
 
 def score_candidates(
     candidates: List[Tuple[Ad, float]],
-    fatigue: FatigueTracker,
     rng: np.random.Generator,
 ) -> List[AdScore]:
     """
@@ -288,7 +266,7 @@ def score_candidates(
         - Value head → expected_revenue
 
     Here we approximate that with:
-        p_ctr = base_ctr × relevance_boost × fatigue_factor × noise
+        p_ctr = base_ctr × relevance_boost × noise
         p_cvr = base_cvr × relevance_boost_smaller × noise
 
     Effective bid (what enters the auction):
@@ -299,20 +277,19 @@ def score_candidates(
     """
     scores = []
     for ad, relevance in candidates:
-        fat = fatigue.factor(ad.id)
         noise = float(rng.normal(1.0, 0.06))   # ±6% prediction noise
 
-        rel_boost_ctr  = 1.0 + relevance * 0.9
-        rel_boost_cvr  = 1.0 + relevance * 0.5
+        rel_boost_ctr = 1.0 + relevance * 0.9
+        rel_boost_cvr = 1.0 + relevance * 0.5
 
-        p_ctr = float(np.clip(ad.base_ctr * rel_boost_ctr * fat * noise, 0.001, 0.99))
-        p_cvr = float(np.clip(ad.base_cvr * rel_boost_cvr * noise,        0.001, 0.99))
+        p_ctr = float(np.clip(ad.base_ctr * rel_boost_ctr * noise, 0.001, 0.99))
+        p_cvr = float(np.clip(ad.base_cvr * rel_boost_cvr * noise, 0.001, 0.99))
 
-        exp_value      = round(p_cvr * ad.avg_order_value, 4)
-        effective_bid  = round(ad.max_cpc * p_ctr, 6)
+        exp_value     = round(p_cvr * ad.avg_order_value, 4)
+        effective_bid = round(ad.max_cpc * p_ctr, 6)
 
         scores.append(AdScore(ad, relevance, round(p_ctr, 4), round(p_cvr, 4),
-                              exp_value, fat, effective_bid))
+                              exp_value, effective_bid))
 
     return sorted(scores, key=lambda s: s.effective_bid, reverse=True)
 
@@ -356,7 +333,6 @@ class AdPipeline:
         print("\n[ Ad Network Pipeline ] Initializing\n")
         self.embed_model = EmbeddingModel()
         self.ads, self.index = load_ad_embeddings(self.embed_model)
-        self.fatigue     = FatigueTracker()
         self.query_n     = 0
         self._rng        = np.random.default_rng(0)
         print("\n  Ready — type a query to run the pipeline.\n")
@@ -386,15 +362,15 @@ class AdPipeline:
             return AuctionResult(None, 0.0, 0.0, [])
 
         # ── Stage 2: DLRM scoring ───────────────────────────────────────────
-        scores = score_candidates(candidates, self.fatigue, self._rng)
+        scores = score_candidates(candidates, self._rng)
 
         print(f"\n  STAGE 2 · DLRM Scoring  (relevance → pCTR, pCVR, expected value)")
-        print(f"  {'Ad':<26} {'Rel':>5} {'pCTR':>6} {'pCVR':>6} {'EV($)':>7} {'Fatigue':>8} {'EffBid':>8}")
-        print(f"  {'─'*66}")
+        print(f"  {'Ad':<26} {'Rel':>5} {'pCTR':>6} {'pCVR':>6} {'EV($)':>7} {'EffBid':>8}")
+        print(f"  {'─'*57}")
         for s in scores:
             marker = " ◄ winner" if s is scores[0] else ""
             print(f"  {s.ad.name:<26} {s.relevance:>5.3f} {s.p_ctr:>6.3f} "
-                  f"{s.p_cvr:>6.3f} {s.exp_value:>7.2f} {s.fatigue:>8.3f} "
+                  f"{s.p_cvr:>6.3f} {s.exp_value:>7.2f} "
                   f"{s.effective_bid:>8.5f}{marker}")
 
         print(f"\n  effective_bid = max_cpc × pCTR")
@@ -415,14 +391,6 @@ class AdPipeline:
             print(f"  Price/click    : ${result.price_click:.4f}  (max_cpc: ${w.ad.max_cpc:.2f})")
             print(f"  Daily spend    : ${w.ad.daily_spend:.4f} / ${w.ad.daily_budget:.0f}")
 
-            # fatigue update
-            self.fatigue.record(w.ad.id)
-            freq = self.fatigue.counts[w.ad.id]
-            next_factor = self.fatigue.factor(w.ad.id)
-            print(f"\n  STAGE 4 · Fatigue Update")
-            print(f"  {w.ad.name} shown {freq}x this session → "
-                  f"next fatigue factor: {next_factor:.2f}  "
-                  f"({'no penalty' if next_factor == 1.0 else f'-{(1-next_factor)*100:.0f}% score'})")
         else:
             print("  No winner (no candidates or all below reserve price).")
 
