@@ -20,6 +20,7 @@ from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from ads import AD_DATA
 from events import EventLog, apply_feedback
+from queries import QUERIES
 
 EMBED_CACHE = Path(__file__).parent / "ad_embeddings.pkl"
 
@@ -358,18 +359,6 @@ class AdPipeline:
         return result
 
 
-# ─── Sample Queries ───────────────────────────────────────────────────────────
-
-SAMPLES = [
-    "How do I deploy a machine learning model to production?",
-    "What's the best way to add user authentication to my app?",
-    "I want to build a chatbot using an LLM",
-    "How do I set up Kubernetes for my startup?",
-    "What is a vector database and when should I use one?",
-    "I need to learn Python for data science",
-    "How can I make my API faster and more reliable?",
-    "How do I detect security vulnerabilities in my code?",
-]
 
 
 if __name__ == "__main__":
@@ -390,7 +379,7 @@ if __name__ == "__main__":
             break
 
         if not raw:
-            query = SAMPLES[sample_i % len(SAMPLES)]
+            query = QUERIES[sample_i % len(QUERIES)]
             sample_i += 1
             print(f"  (sample: \"{query}\")")
         else:
