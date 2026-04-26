@@ -3,10 +3,12 @@ LLM Ad Network — Real Embedding Pipeline
 
 Full pipeline per query:
   1. Embed query locally (sentence-transformers, all-MiniLM-L6-v2)
-  2. Cosine similarity vs pre-embedded ad catalog → candidate shortlist
-  3. Mock DLRM scorer: relevance + ad stats → pCTR, pCVR, expected value
+  2. ANN search via HNSW index → candidate shortlist by cosine similarity
+  3. Mock DLRM scorer: relevance + ad stats → pCTR, pCVR → implied_cpc → effective_bid
   4. Second-price auction on effective bids
-  5. Ad fatigue tracking (score decays with repeated impressions)
+
+Advertisers provide only: daily_budget + target_cpa.
+The platform derives per-impression bids from those inputs + model predictions.
 """
 
 import pickle
@@ -39,7 +41,7 @@ class Ad:
     name:             str
     description:      str    # text that gets embedded
     category:         str
-    max_cpc:          float  # advertiser's max cost-per-click ($)
+    target_cpa:       float  # advertiser's max cost-per-acquisition ($) — only input besides budget
     daily_budget:     float
     base_ctr:         float  # historical click-through rate
     base_cvr:         float  # historical conversion rate (given click)
@@ -52,90 +54,90 @@ AD_CATALOG: List[Ad] = [
     # Cloud / DevOps
     Ad("ad_01", "CloudBase Pro",
        "Deploy Python and Node apps to the cloud with one command. Auto-scaling, built-in monitoring, zero config.",
-       "cloud", max_cpc=2.80, daily_budget=400, base_ctr=0.045, base_cvr=0.12, avg_order_value=180),
+       "cloud", target_cpa=45, daily_budget=400, base_ctr=0.045, base_cvr=0.12, avg_order_value=180),
 
     Ad("ad_02", "ServerlessNow",
        "Run your backend without managing servers. Serverless functions with instant cold starts. Pay per use.",
-       "cloud", max_cpc=2.20, daily_budget=300, base_ctr=0.038, base_cvr=0.10, avg_order_value=150),
+       "cloud", target_cpa=38, daily_budget=300, base_ctr=0.038, base_cvr=0.10, avg_order_value=150),
 
     Ad("ad_03", "GitOps Pipeline",
        "Automate CI/CD workflows. One-click deployments, instant rollback, GitHub and GitLab integration.",
-       "devops", max_cpc=1.90, daily_budget=250, base_ctr=0.042, base_cvr=0.09, avg_order_value=120),
+       "devops", target_cpa=30, daily_budget=250, base_ctr=0.042, base_cvr=0.09, avg_order_value=120),
 
     # ML / AI
     Ad("ad_04", "ModelDeploy",
        "Deploy machine learning models to production in minutes. REST API auto-generated. Supports PyTorch, TensorFlow, scikit-learn.",
-       "ml", max_cpc=3.50, daily_budget=600, base_ctr=0.052, base_cvr=0.14, avg_order_value=250),
+       "ml", target_cpa=62, daily_budget=600, base_ctr=0.052, base_cvr=0.14, avg_order_value=250),
 
     Ad("ad_05", "DataSpark ML",
        "Visual ML pipeline builder. Drag-and-drop feature engineering, automated hyperparameter tuning, no-code model training.",
-       "ml", max_cpc=3.20, daily_budget=500, base_ctr=0.048, base_cvr=0.13, avg_order_value=220),
+       "ml", target_cpa=55, daily_budget=500, base_ctr=0.048, base_cvr=0.13, avg_order_value=220),
 
     Ad("ad_06", "VectorDB Cloud",
        "Managed vector database for AI apps. Store and search billions of embeddings at sub-10ms latency. Built for LLMs.",
-       "ml", max_cpc=4.00, daily_budget=700, base_ctr=0.055, base_cvr=0.15, avg_order_value=300),
+       "ml", target_cpa=75, daily_budget=700, base_ctr=0.055, base_cvr=0.15, avg_order_value=300),
 
     # Security
     Ad("ad_07", "AuthShield",
        "Add authentication to your app in 5 minutes. OAuth2, SAML, MFA, passwordless. SOC2 compliant.",
-       "security", max_cpc=2.50, daily_budget=350, base_ctr=0.040, base_cvr=0.11, avg_order_value=160),
+       "security", target_cpa=40, daily_budget=350, base_ctr=0.040, base_cvr=0.11, avg_order_value=160),
 
     Ad("ad_08", "SecureScan",
        "Automated security scanning for your codebase. Detect vulnerabilities and leaked secrets before they ship.",
-       "security", max_cpc=2.10, daily_budget=280, base_ctr=0.035, base_cvr=0.09, avg_order_value=140),
+       "security", target_cpa=35, daily_budget=280, base_ctr=0.035, base_cvr=0.09, avg_order_value=140),
 
     # Data / Analytics
     Ad("ad_09", "QueryFlow",
        "SQL analytics platform for data teams. Connect to any warehouse, build dashboards, schedule reports.",
-       "analytics", max_cpc=2.30, daily_budget=320, base_ctr=0.041, base_cvr=0.10, avg_order_value=190),
+       "analytics", target_cpa=48, daily_budget=320, base_ctr=0.041, base_cvr=0.10, avg_order_value=190),
 
     Ad("ad_10", "StreamPulse",
        "Real-time data streaming and analytics. Kafka-compatible, process millions of events per second.",
-       "analytics", max_cpc=3.10, daily_budget=450, base_ctr=0.047, base_cvr=0.12, avg_order_value=210),
+       "analytics", target_cpa=52, daily_budget=450, base_ctr=0.047, base_cvr=0.12, avg_order_value=210),
 
     # Developer Tools
     Ad("ad_11", "CodeReview AI",
        "AI-powered code review that catches bugs before your teammates do. GitHub, GitLab, Bitbucket integration.",
-       "devtools", max_cpc=1.80, daily_budget=220, base_ctr=0.043, base_cvr=0.11, avg_order_value=100),
+       "devtools", target_cpa=25, daily_budget=220, base_ctr=0.043, base_cvr=0.11, avg_order_value=100),
 
     Ad("ad_12", "DocGen Pro",
        "Auto-generate API documentation from your codebase. OpenAPI, GraphQL, gRPC. Always in sync with your code.",
-       "devtools", max_cpc=1.50, daily_budget=180, base_ctr=0.037, base_cvr=0.08, avg_order_value=80),
+       "devtools", target_cpa=20, daily_budget=180, base_ctr=0.037, base_cvr=0.08, avg_order_value=80),
 
     Ad("ad_13", "LogSense",
        "Intelligent log aggregation and alerting. Trace distributed requests, sub-1s search over terabytes of logs.",
-       "devtools", max_cpc=2.00, daily_budget=270, base_ctr=0.039, base_cvr=0.10, avg_order_value=130),
+       "devtools", target_cpa=32, daily_budget=270, base_ctr=0.039, base_cvr=0.10, avg_order_value=130),
 
     # LLM / AI Apps
     Ad("ad_14", "PromptLayer",
        "Track, version, and A/B test your LLM prompts. Monitor costs, debug responses. Works with OpenAI and Anthropic.",
-       "llm", max_cpc=3.80, daily_budget=550, base_ctr=0.058, base_cvr=0.16, avg_order_value=280),
+       "llm", target_cpa=70, daily_budget=550, base_ctr=0.058, base_cvr=0.16, avg_order_value=280),
 
     Ad("ad_15", "LangChain Cloud",
        "Deploy LangChain and LlamaIndex apps to production. Managed vector stores, agent tracing, auto-scaling.",
-       "llm", max_cpc=4.20, daily_budget=650, base_ctr=0.060, base_cvr=0.17, avg_order_value=320),
+       "llm", target_cpa=80, daily_budget=650, base_ctr=0.060, base_cvr=0.17, avg_order_value=320),
 
     Ad("ad_16", "EmbedAPI",
        "Fast, cheap text embeddings API. 1M tokens for $0.02. OpenAI-compatible format. 50+ languages.",
-       "llm", max_cpc=3.60, daily_budget=500, base_ctr=0.054, base_cvr=0.14, avg_order_value=260),
+       "llm", target_cpa=65, daily_budget=500, base_ctr=0.054, base_cvr=0.14, avg_order_value=260),
 
     # Education
     Ad("ad_17", "DeepLearn.io",
        "Master machine learning and deep learning. 200+ hours of hands-on courses, real datasets, certificate included.",
-       "education", max_cpc=1.60, daily_budget=200, base_ctr=0.050, base_cvr=0.18, avg_order_value=120),
+       "education", target_cpa=30, daily_budget=200, base_ctr=0.050, base_cvr=0.18, avg_order_value=120),
 
     Ad("ad_18", "CodeCamp Pro",
        "Become a full-stack developer in 12 weeks. Python, React, databases, cloud. Job placement guarantee.",
-       "education", max_cpc=1.40, daily_budget=160, base_ctr=0.048, base_cvr=0.15, avg_order_value=100),
+       "education", target_cpa=25, daily_budget=160, base_ctr=0.048, base_cvr=0.15, avg_order_value=100),
 
     # Infrastructure
     Ad("ad_19", "K8sEasy",
        "Kubernetes made simple. Manage clusters visually, auto-scaling policies, cost optimization. No YAML required.",
-       "infra", max_cpc=2.70, daily_budget=380, base_ctr=0.044, base_cvr=0.11, avg_order_value=200),
+       "infra", target_cpa=50, daily_budget=380, base_ctr=0.044, base_cvr=0.11, avg_order_value=200),
 
     Ad("ad_20", "EdgeDeploy",
        "Deploy to 200 edge locations worldwide. Sub-50ms global latency. DDoS protection and WAF included.",
-       "infra", max_cpc=2.40, daily_budget=340, base_ctr=0.040, base_cvr=0.10, avg_order_value=170),
+       "infra", target_cpa=42, daily_budget=340, base_ctr=0.040, base_cvr=0.10, avg_order_value=170),
 ]
 
 
@@ -249,7 +251,8 @@ class AdScore:
     p_ctr:         float   # predicted click-through rate
     p_cvr:         float   # predicted conversion rate (given click)
     exp_value:     float   # p_cvr × avg_order_value  ($)
-    effective_bid: float   # what goes into the auction
+    implied_cpc:   float   # target_cpa × p_cvr — platform-derived cost-per-click ceiling
+    effective_bid: float   # implied_cpc × p_ctr — expected cost per impression (enters auction)
 
 
 def score_candidates(
@@ -259,21 +262,16 @@ def score_candidates(
     """
     Mock DLRM scorer.
 
-    In production: feed (query_emb, ad_emb, user features, context features)
-    into a neural net with three output heads:
-        - CTR head  → p_ctr
-        - CVR head  → p_cvr
-        - Value head → expected_revenue
+    Advertisers provide only target_cpa and daily_budget.
+    The platform derives a per-impression bid in two steps:
 
-    Here we approximate that with:
-        p_ctr = base_ctr × relevance_boost × noise
-        p_cvr = base_cvr × relevance_boost_smaller × noise
+      Step 1 — implied_cpc = target_cpa × p_cvr
+        "If I pay this much per click, and p_cvr% of clicks convert,
+         my cost per acquisition equals target_cpa."
 
-    Effective bid (what enters the auction):
-        effective_bid = max_cpc × p_ctr
-        → "if I bid $X per click and the model says 4% click probability,
-           my expected cost per impression shown is $X × 0.04"
-        → this is what the platform actually ranks on (expected revenue per impression)
+      Step 2 — effective_bid = implied_cpc × p_ctr
+        "Expected cost to the advertiser per impression shown."
+        This is what the auction ranks on.
     """
     scores = []
     for ad, relevance in candidates:
@@ -285,11 +283,12 @@ def score_candidates(
         p_ctr = float(np.clip(ad.base_ctr * rel_boost_ctr * noise, 0.001, 0.99))
         p_cvr = float(np.clip(ad.base_cvr * rel_boost_cvr * noise, 0.001, 0.99))
 
-        exp_value     = round(p_cvr * ad.avg_order_value, 4)
-        effective_bid = round(ad.max_cpc * p_ctr, 6)
+        exp_value    = round(p_cvr * ad.avg_order_value, 4)
+        implied_cpc  = round(ad.target_cpa * p_cvr, 6)
+        effective_bid = round(implied_cpc * p_ctr, 6)
 
         scores.append(AdScore(ad, relevance, round(p_ctr, 4), round(p_cvr, 4),
-                              exp_value, effective_bid))
+                              exp_value, implied_cpc, effective_bid))
 
     return sorted(scores, key=lambda s: s.effective_bid, reverse=True)
 
@@ -364,18 +363,19 @@ class AdPipeline:
         # ── Stage 2: DLRM scoring ───────────────────────────────────────────
         scores = score_candidates(candidates, self._rng)
 
-        print(f"\n  STAGE 2 · DLRM Scoring  (relevance → pCTR, pCVR, expected value)")
-        print(f"  {'Ad':<26} {'Rel':>5} {'pCTR':>6} {'pCVR':>6} {'EV($)':>7} {'EffBid':>8}")
-        print(f"  {'─'*57}")
+        print(f"\n  STAGE 2 · DLRM Scoring  (relevance → pCTR, pCVR → implied_cpc → effective_bid)")
+        print(f"  {'Ad':<26} {'Rel':>5} {'pCTR':>6} {'pCVR':>6} {'EV($)':>7} {'impCPC':>8} {'EffBid':>8}")
+        print(f"  {'─'*66}")
         for s in scores:
             marker = " ◄ winner" if s is scores[0] else ""
             print(f"  {s.ad.name:<26} {s.relevance:>5.3f} {s.p_ctr:>6.3f} "
                   f"{s.p_cvr:>6.3f} {s.exp_value:>7.2f} "
-                  f"{s.effective_bid:>8.5f}{marker}")
+                  f"{s.implied_cpc:>8.4f} {s.effective_bid:>8.5f}{marker}")
 
-        print(f"\n  effective_bid = max_cpc × pCTR")
-        print(f"  → '{scores[0].ad.name}': ${scores[0].ad.max_cpc} × {scores[0].p_ctr:.3f} "
-              f"= ${scores[0].effective_bid:.5f} per impression")
+        w0 = scores[0]
+        print(f"\n  Bid derivation for '{w0.ad.name}':")
+        print(f"    implied_cpc  = target_cpa × pCVR  = ${w0.ad.target_cpa} × {w0.p_cvr:.3f} = ${w0.implied_cpc:.4f}")
+        print(f"    effective_bid = implied_cpc × pCTR = ${w0.implied_cpc:.4f} × {w0.p_ctr:.3f} = ${w0.effective_bid:.5f}/impr")
 
         # ── Stage 3: auction ────────────────────────────────────────────────
         result = run_auction(scores)
@@ -388,7 +388,7 @@ class AdPipeline:
             print(f"  Winning bid    : ${w.effective_bid:.5f}/impr")
             print(f"  Second-highest : ${second:.5f}/impr  ← winner pays this")
             print(f"  Price/impr     : ${result.price_impr:.5f}")
-            print(f"  Price/click    : ${result.price_click:.4f}  (max_cpc: ${w.ad.max_cpc:.2f})")
+            print(f"  Price/click    : ${result.price_click:.4f}  (implied_cpc: ${w.implied_cpc:.4f}, target_cpa: ${w.ad.target_cpa})")
             print(f"  Daily spend    : ${w.ad.daily_spend:.4f} / ${w.ad.daily_budget:.0f}")
 
         else:
