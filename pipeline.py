@@ -14,26 +14,16 @@ The platform derives per-impression bids from those inputs + model predictions.
 import pickle
 import numpy as np
 import hnswlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
+from ads import AD_DATA
 
 EMBED_CACHE = Path(__file__).parent / "ad_embeddings.pkl"
-HNSW_CACHE  = Path(__file__).parent / "ad_index.bin"
-MODEL_NAME  = "all-MiniLM-L6-v2"
-EMBED_DIM   = 384
-
-# HNSW index parameters
-# M              : edges per node per layer — higher = better recall, more memory
-# ef_construction: neighbor search breadth during insert — higher = better graph, slower build
-# ef_search      : neighbor search breadth at query time — tune up for higher recall
-HNSW_M               = 16
-HNSW_EF_CONSTRUCTION = 200
-HNSW_EF_SEARCH       = 50
 
 
-# ─── Ad Catalog ───────────────────────────────────────────────────────────────
+# ─── Ad Model ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class Ad:
@@ -46,99 +36,22 @@ class Ad:
     base_ctr:         float  # historical click-through rate
     base_cvr:         float  # historical conversion rate (given click)
     avg_order_value:  float  # avg revenue per conversion ($)
-    embedding:        Optional[np.ndarray] = field(default=None, repr=False)
+    embedding:        Optional[np.ndarray] = None
     daily_spend:      float = 0.0
 
 
-AD_CATALOG: List[Ad] = [
-    # Cloud / DevOps
-    Ad("ad_01", "CloudBase Pro",
-       "Deploy Python and Node apps to the cloud with one command. Auto-scaling, built-in monitoring, zero config.",
-       "cloud", target_cpa=45, daily_budget=400, base_ctr=0.045, base_cvr=0.12, avg_order_value=180),
+AD_CATALOG: List[Ad] = [Ad(**row) for row in AD_DATA]
+HNSW_CACHE  = Path(__file__).parent / "ad_index.bin"
+MODEL_NAME  = "all-MiniLM-L6-v2"
+EMBED_DIM   = 384
 
-    Ad("ad_02", "ServerlessNow",
-       "Run your backend without managing servers. Serverless functions with instant cold starts. Pay per use.",
-       "cloud", target_cpa=38, daily_budget=300, base_ctr=0.038, base_cvr=0.10, avg_order_value=150),
-
-    Ad("ad_03", "GitOps Pipeline",
-       "Automate CI/CD workflows. One-click deployments, instant rollback, GitHub and GitLab integration.",
-       "devops", target_cpa=30, daily_budget=250, base_ctr=0.042, base_cvr=0.09, avg_order_value=120),
-
-    # ML / AI
-    Ad("ad_04", "ModelDeploy",
-       "Deploy machine learning models to production in minutes. REST API auto-generated. Supports PyTorch, TensorFlow, scikit-learn.",
-       "ml", target_cpa=62, daily_budget=600, base_ctr=0.052, base_cvr=0.14, avg_order_value=250),
-
-    Ad("ad_05", "DataSpark ML",
-       "Visual ML pipeline builder. Drag-and-drop feature engineering, automated hyperparameter tuning, no-code model training.",
-       "ml", target_cpa=55, daily_budget=500, base_ctr=0.048, base_cvr=0.13, avg_order_value=220),
-
-    Ad("ad_06", "VectorDB Cloud",
-       "Managed vector database for AI apps. Store and search billions of embeddings at sub-10ms latency. Built for LLMs.",
-       "ml", target_cpa=75, daily_budget=700, base_ctr=0.055, base_cvr=0.15, avg_order_value=300),
-
-    # Security
-    Ad("ad_07", "AuthShield",
-       "Add authentication to your app in 5 minutes. OAuth2, SAML, MFA, passwordless. SOC2 compliant.",
-       "security", target_cpa=40, daily_budget=350, base_ctr=0.040, base_cvr=0.11, avg_order_value=160),
-
-    Ad("ad_08", "SecureScan",
-       "Automated security scanning for your codebase. Detect vulnerabilities and leaked secrets before they ship.",
-       "security", target_cpa=35, daily_budget=280, base_ctr=0.035, base_cvr=0.09, avg_order_value=140),
-
-    # Data / Analytics
-    Ad("ad_09", "QueryFlow",
-       "SQL analytics platform for data teams. Connect to any warehouse, build dashboards, schedule reports.",
-       "analytics", target_cpa=48, daily_budget=320, base_ctr=0.041, base_cvr=0.10, avg_order_value=190),
-
-    Ad("ad_10", "StreamPulse",
-       "Real-time data streaming and analytics. Kafka-compatible, process millions of events per second.",
-       "analytics", target_cpa=52, daily_budget=450, base_ctr=0.047, base_cvr=0.12, avg_order_value=210),
-
-    # Developer Tools
-    Ad("ad_11", "CodeReview AI",
-       "AI-powered code review that catches bugs before your teammates do. GitHub, GitLab, Bitbucket integration.",
-       "devtools", target_cpa=25, daily_budget=220, base_ctr=0.043, base_cvr=0.11, avg_order_value=100),
-
-    Ad("ad_12", "DocGen Pro",
-       "Auto-generate API documentation from your codebase. OpenAPI, GraphQL, gRPC. Always in sync with your code.",
-       "devtools", target_cpa=20, daily_budget=180, base_ctr=0.037, base_cvr=0.08, avg_order_value=80),
-
-    Ad("ad_13", "LogSense",
-       "Intelligent log aggregation and alerting. Trace distributed requests, sub-1s search over terabytes of logs.",
-       "devtools", target_cpa=32, daily_budget=270, base_ctr=0.039, base_cvr=0.10, avg_order_value=130),
-
-    # LLM / AI Apps
-    Ad("ad_14", "PromptLayer",
-       "Track, version, and A/B test your LLM prompts. Monitor costs, debug responses. Works with OpenAI and Anthropic.",
-       "llm", target_cpa=70, daily_budget=550, base_ctr=0.058, base_cvr=0.16, avg_order_value=280),
-
-    Ad("ad_15", "LangChain Cloud",
-       "Deploy LangChain and LlamaIndex apps to production. Managed vector stores, agent tracing, auto-scaling.",
-       "llm", target_cpa=80, daily_budget=650, base_ctr=0.060, base_cvr=0.17, avg_order_value=320),
-
-    Ad("ad_16", "EmbedAPI",
-       "Fast, cheap text embeddings API. 1M tokens for $0.02. OpenAI-compatible format. 50+ languages.",
-       "llm", target_cpa=65, daily_budget=500, base_ctr=0.054, base_cvr=0.14, avg_order_value=260),
-
-    # Education
-    Ad("ad_17", "DeepLearn.io",
-       "Master machine learning and deep learning. 200+ hours of hands-on courses, real datasets, certificate included.",
-       "education", target_cpa=30, daily_budget=200, base_ctr=0.050, base_cvr=0.18, avg_order_value=120),
-
-    Ad("ad_18", "CodeCamp Pro",
-       "Become a full-stack developer in 12 weeks. Python, React, databases, cloud. Job placement guarantee.",
-       "education", target_cpa=25, daily_budget=160, base_ctr=0.048, base_cvr=0.15, avg_order_value=100),
-
-    # Infrastructure
-    Ad("ad_19", "K8sEasy",
-       "Kubernetes made simple. Manage clusters visually, auto-scaling policies, cost optimization. No YAML required.",
-       "infra", target_cpa=50, daily_budget=380, base_ctr=0.044, base_cvr=0.11, avg_order_value=200),
-
-    Ad("ad_20", "EdgeDeploy",
-       "Deploy to 200 edge locations worldwide. Sub-50ms global latency. DDoS protection and WAF included.",
-       "infra", target_cpa=42, daily_budget=340, base_ctr=0.040, base_cvr=0.10, avg_order_value=170),
-]
+# HNSW index parameters
+# M              : edges per node per layer — higher = better recall, more memory
+# ef_construction: neighbor search breadth during insert — higher = better graph, slower build
+# ef_search      : neighbor search breadth at query time — tune up for higher recall
+HNSW_M               = 16
+HNSW_EF_CONSTRUCTION = 200
+HNSW_EF_SEARCH       = 50
 
 
 # ─── Embedding Layer ──────────────────────────────────────────────────────────
