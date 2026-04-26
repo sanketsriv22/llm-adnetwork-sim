@@ -90,30 +90,42 @@ class EventLog:
         return len(self.conversions)
 
 
-def apply_feedback(ads, event_log: EventLog, min_impressions: int = 5) -> List[tuple]:
+PRIOR_STRENGTH = 100   # treat initial base_ctr/base_cvr as if observed from this many impressions
+
+
+def apply_feedback(ads, event_log: EventLog) -> List[tuple]:
     """
-    Recompute base_ctr and base_cvr from observed event data and update
-    Ad objects in place.
+    Bayesian update of base_ctr and base_cvr from observed event data.
 
-    Only updates an ad if it has at least min_impressions — below that
-    threshold the estimates are too noisy to trust over the prior.
+    Instead of hard-replacing rates with observed values (which explodes with
+    sparse data), we blend observed counts with a prior anchored to the ad's
+    original base_ctr / base_cvr:
 
-    Returns a list of (ad_name, old_ctr, new_ctr, old_cvr, new_cvr)
-    for any ad that was actually updated.
+        new_ctr = (prior_clicks + observed_clicks) / (prior_strength + observed_impressions)
+
+    With few impressions the estimate barely moves off the prior.
+    With hundreds of impressions the observed data dominates.
+    This prevents runaway values (0.99 or 0.001) from noisy early updates.
+
+    Returns a list of (ad_name, old_ctr, new_ctr, old_cvr, new_cvr).
     """
     stats = event_log.stats_per_ad()
     updates = []
 
     for ad in ads:
         s = stats.get(ad.id)
-        if not s or s["impressions"] < min_impressions:
+        if not s:
             continue
 
         old_ctr = ad.base_ctr
         old_cvr = ad.base_cvr
 
-        ad.base_ctr = s["clicks"] / s["impressions"]
-        ad.base_cvr = s["conversions"] / s["clicks"] if s["clicks"] > 0 else ad.base_cvr
+        prior_clicks = ad._init_ctr * PRIOR_STRENGTH
+        prior_convs  = ad._init_cvr * PRIOR_STRENGTH
+
+        ad.base_ctr = (prior_clicks + s["clicks"]) / (PRIOR_STRENGTH + s["impressions"])
+        ad.base_cvr = (prior_convs  + s["conversions"]) / (PRIOR_STRENGTH + s["clicks"]) \
+                      if s["clicks"] > 0 else ad.base_cvr
 
         updates.append((ad.name, old_ctr, ad.base_ctr, old_cvr, ad.base_cvr))
 

@@ -34,11 +34,18 @@ class Ad:
     category:         str
     target_cpa:       float  # advertiser's max cost-per-acquisition ($) — only input besides budget
     daily_budget:     float
-    base_ctr:         float  # historical click-through rate
-    base_cvr:         float  # historical conversion rate (given click)
+    base_ctr:         float  # click-through rate — updated by feedback loop
+    base_cvr:         float  # conversion rate (given click) — updated by feedback loop
     avg_order_value:  float  # avg revenue per conversion ($)
     embedding:        Optional[np.ndarray] = None
     daily_spend:      float = 0.0
+    # set by __post_init__, never changed — used as Bayesian prior in apply_feedback
+    _init_ctr:        float = 0.0
+    _init_cvr:        float = 0.0
+
+    def __post_init__(self):
+        self._init_ctr = self.base_ctr
+        self._init_cvr = self.base_cvr
 
 
 AD_CATALOG: List[Ad] = [Ad(**row) for row in AD_DATA]
