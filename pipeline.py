@@ -19,6 +19,7 @@ from typing import List, Tuple, Optional
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from ads import AD_DATA
+from events import EventLog, apply_feedback
 
 EMBED_CACHE = Path(__file__).parent / "ad_embeddings.pkl"
 
@@ -241,10 +242,13 @@ def run_auction(scores: List[AdScore]) -> AuctionResult:
 
 class AdPipeline:
 
+    FEEDBACK_INTERVAL = 10   # run apply_feedback() every N total impressions
+
     def __init__(self):
         print("\n[ Ad Network Pipeline ] Initializing\n")
         self.embed_model = EmbeddingModel()
         self.ads, self.index = load_ad_embeddings(self.embed_model)
+        self.event_log   = EventLog()
         self.query_n     = 0
         self._rng        = np.random.default_rng(0)
         print("\n  Ready — type a query to run the pipeline.\n")
@@ -306,6 +310,42 @@ class AdPipeline:
 
         else:
             print("  No winner (no candidates or all below reserve price).")
+            print(f"\n{'─'*W}")
+            return result
+
+        # ── Stage 4: log events + simulate outcome ──────────────────────────
+        w = result.winner
+        imp_id = self.event_log.log_impression(w.ad.id, query)
+
+        clicked   = bool(self._rng.random() < w.p_ctr)
+        converted = clicked and bool(self._rng.random() < w.p_cvr)
+
+        if clicked:
+            self.event_log.log_click(imp_id)
+        if converted:
+            self.event_log.log_conversion(imp_id, w.ad.avg_order_value)
+
+        print(f"\n  STAGE 4 · Event Log")
+        print(f"  impression_id : {imp_id}")
+        print(f"  clicked       : {'YES' if clicked else 'NO'}")
+        print(f"  converted     : {'YES' if converted else 'NO'}")
+        print(f"  session total : {self.event_log.total_impressions} impr  "
+              f"{self.event_log.total_clicks} clicks  "
+              f"{self.event_log.total_conversions} conversions")
+
+        # ── Feedback loop ───────────────────────────────────────────────────
+        if self.event_log.total_impressions % self.FEEDBACK_INTERVAL == 0:
+            updates = apply_feedback(self.ads, self.event_log)
+            print(f"\n  FEEDBACK UPDATE  (triggered every {self.FEEDBACK_INTERVAL} impressions)")
+            if updates:
+                print(f"  {'Ad':<26} {'old_ctr':>8} {'new_ctr':>8} {'old_cvr':>8} {'new_cvr':>8}")
+                print(f"  {'─'*58}")
+                for name, octr, nctr, ocvr, ncvr in updates:
+                    ctr_arrow = "↑" if nctr > octr else "↓" if nctr < octr else "="
+                    cvr_arrow = "↑" if ncvr > ocvr else "↓" if ncvr < ocvr else "="
+                    print(f"  {name:<26} {octr:>8.4f} {nctr:>8.4f}{ctr_arrow} {ocvr:>8.4f} {ncvr:>8.4f}{cvr_arrow}")
+            else:
+                print(f"  No ads with >= 5 impressions yet — no updates applied.")
 
         print(f"\n{'─'*W}")
         return result
