@@ -322,11 +322,14 @@ class AdPipeline:
             return result
 
         # ── Stage 4: log events + simulate outcome ──────────────────────────
+        # Ground-truth clicks/conversions use base_ctr/base_cvr (intrinsic ad quality),
+        # not the relevance-boosted p_ctr/p_cvr used for bidding. This prevents the
+        # feedback loop from learning auction-winner-biased rates instead of true rates.
         w = result.winner
         imp_id = self.event_log.log_impression(w.ad.id, query)
 
-        clicked   = bool(self._rng.random() < w.p_ctr)
-        converted = clicked and bool(self._rng.random() < w.p_cvr)
+        clicked   = bool(self._rng.random() < w.ad.base_ctr)
+        converted = clicked and bool(self._rng.random() < w.ad.base_cvr)
 
         if clicked:
             self.event_log.log_click(imp_id)

@@ -173,8 +173,8 @@ def run_simulation(n_queries: int):
         imp_id = event_log.log_impression(w.ad.id, query)
         served += 1
 
-        clicked   = rng.random() < w.p_ctr
-        converted = clicked and (rng.random() < w.p_cvr)
+        clicked   = rng.random() < w.ad.base_ctr
+        converted = clicked and (rng.random() < w.ad.base_cvr)
         if clicked:
             event_log.log_click(imp_id)
         if converted:
