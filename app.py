@@ -279,15 +279,14 @@ with tab1:
         fig = px.scatter(
             scatter_df,
             x="CTR %", y="CVR %",
-            size="Impressions", size_max=60,
+            size="Impressions", size_max=55,
             color="Category",
             hover_name="Ad",
-            text="Ad",
+            hover_data={"Impressions": True, "CTR %": ":.2f", "CVR %": ":.2f"},
             title="CTR % vs CVR %  (bubble size = impressions)",
             height=420,
             color_discrete_sequence=px.colors.qualitative.Safe,
         )
-        fig.update_traces(textposition="top center", textfont_size=8)
         fig.update_layout(legend_title="Category")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -317,6 +316,11 @@ with tab2:
         filtered = evo_df[evo_df["Ad"].isin(selected)]
         name_to_ad = {ad.name: ad for ad in ads}
 
+        # Tight y-axis zoom so small Bayesian drift is visible
+        y_vals  = filtered[metric].dropna()
+        y_pad   = max((y_vals.max() - y_vals.min()) * 0.3, 0.05)
+        y_range = [max(0, y_vals.min() - y_pad), y_vals.max() + y_pad]
+
         fig = px.line(
             filtered, x="Day", y=metric, color="Ad",
             title=f"{metric} evolution over simulated days",
@@ -328,8 +332,11 @@ with tab2:
             if ad:
                 init_val = (ad._init_ctr if metric == "CTR %" else ad._init_cvr) * 100
                 fig.add_hline(y=init_val, line_dash="dash", line_color="gray",
-                              opacity=0.25)
-        fig.update_layout(legend_title="Ad")
+                              opacity=0.3)
+        fig.update_layout(
+            legend_title="Ad",
+            yaxis=dict(range=y_range, title=metric),
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 
