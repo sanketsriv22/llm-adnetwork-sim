@@ -7,29 +7,24 @@ Usage:
 
 Outputs:
     - per-ad stats table printed to stdout
-    - rate_evolution.png  (CTR/CVR drift per ad over simulated days)
 """
 
 import argparse
 import time
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from pathlib import Path
 
-from pipeline import AdPipeline, match_candidates, score_candidates, run_auction, AD_CATALOG
+from pipeline import match_candidates, score_candidates, run_auction
 from events import apply_feedback
 from queries import QUERIES
 
 
 # ── Simulation constants ──────────────────────────────────────────────────────
 
-IMPRESSIONS_PER_DAY = 10_000   # budget resets every this many total impressions
-FEEDBACK_INTERVAL   = 1_000    # apply_feedback() every N impressions
+IMPRESSIONS_PER_DAY = 10_000
+FEEDBACK_INTERVAL   = 1_000
 
 
-# ── Stats helpers ─────────────────────────────────────────────────────────────
+# ── Stats ─────────────────────────────────────────────────────────────────────
 
 def print_stats(ads, event_log):
     stats = event_log.stats_per_ad()
@@ -63,43 +58,6 @@ def print_stats(ads, event_log):
     print(f"  Overall CVR       : {overall_cvr:.2f}%")
 
 
-def plot_rate_evolution(snapshots, ads, out_path="rate_evolution.png"):
-    """
-    snapshots: list of (day_idx, {ad_id: (ctr, cvr)})
-    Produces one subplot per ad showing CTR and CVR over simulated days.
-    """
-    days = [s[0] for s in snapshots]
-    n    = len(ads)
-    cols = 4
-    rows = (n + cols - 1) // cols
-
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 3.5), squeeze=False)
-    fig.suptitle("CTR / CVR Evolution Over Simulated Days", fontsize=14, y=1.01)
-
-    for i, ad in enumerate(ads):
-        ax  = axes[i // cols][i % cols]
-        ctr_vals = [s[1].get(ad.id, (ad._init_ctr, ad._init_cvr))[0] for s in snapshots]
-        cvr_vals = [s[1].get(ad.id, (ad._init_ctr, ad._init_cvr))[1] for s in snapshots]
-
-        ax.plot(days, [v * 100 for v in ctr_vals], label="CTR%", color="steelblue")
-        ax.plot(days, [v * 100 for v in cvr_vals], label="CVR%", color="darkorange")
-        ax.axhline(ad._init_ctr * 100, color="steelblue", linestyle="--", linewidth=0.8, alpha=0.5)
-        ax.axhline(ad._init_cvr * 100, color="darkorange", linestyle="--", linewidth=0.8, alpha=0.5)
-        ax.set_title(f"{ad.name}", fontsize=9)
-        ax.set_xlabel("Day", fontsize=7)
-        ax.set_ylabel("%", fontsize=7)
-        ax.tick_params(labelsize=7)
-        ax.legend(fontsize=6)
-
-    # hide unused subplots
-    for j in range(n, rows * cols):
-        axes[j // cols][j % cols].set_visible(False)
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=140, bbox_inches="tight")
-    print(f"\n  Saved chart → {out_path}")
-
-
 # ── Main simulation loop ──────────────────────────────────────────────────────
 
 def run_simulation(n_queries: int):
@@ -107,8 +65,7 @@ def run_simulation(n_queries: int):
           f"days={n_queries // IMPRESSIONS_PER_DAY}  "
           f"feedback every {FEEDBACK_INTERVAL:,} impr\n")
 
-    # ── init pipeline (loads model + index once) ──────────────────────────────
-    from pipeline import EmbeddingModel, load_ad_embeddings, AD_CATALOG
+    from pipeline import EmbeddingModel, load_ad_embeddings
     from events import EventLog
 
     embed_model = EmbeddingModel()
@@ -116,59 +73,40 @@ def run_simulation(n_queries: int):
     event_log   = EventLog()
     rng         = np.random.default_rng(42)
 
-    # ── pre-embed all queries once ────────────────────────────────────────────
     print(f"\n  Pre-embedding {len(QUERIES)} sample queries...", end=" ", flush=True)
-    query_texts = QUERIES
-    query_embs  = embed_model.embed_batch(query_texts)
+    query_embs = embed_model.embed_batch(QUERIES)
     print("OK")
 
-    snapshots: list = []   # (day_idx, {ad_id: (ctr, cvr)})
-
-    def take_snapshot(day_idx):
-        snap = {ad.id: (ad.base_ctr, ad.base_cvr) for ad in ads}
-        snapshots.append((day_idx, snap))
-
-    take_snapshot(0)
-
-    # ── simulation ────────────────────────────────────────────────────────────
-    t0          = time.time()
-    served      = 0
-    day         = 0
+    t0     = time.time()
+    served = 0
+    day    = 0
 
     print(f"\n  Running...")
 
     for i in range(n_queries):
-        # daily budget reset
         if i > 0 and i % IMPRESSIONS_PER_DAY == 0:
             day += 1
             for ad in ads:
                 ad.daily_spend = 0.0
-            take_snapshot(day)
             elapsed = time.time() - t0
             pct = 100 * i / n_queries
             print(f"  Day {day:>3}  ({pct:.0f}%)  served={served:,}  "
                   f"impr={event_log.total_impressions:,}  "
                   f"elapsed={elapsed:.1f}s")
 
-        # pick a random pre-embedded query
-        qi     = int(rng.integers(len(query_embs)))
-        q_emb  = query_embs[qi]
-        query  = query_texts[qi]
+        qi    = int(rng.integers(len(query_embs)))
+        q_emb = query_embs[qi]
+        query = QUERIES[qi]
 
-        # stage 1: match
         candidates = match_candidates(q_emb, ads, index)
         if not candidates:
             continue
 
-        # stage 2: score
         scores = score_candidates(candidates, rng)
-
-        # stage 3: auction
         result = run_auction(scores)
         if not result.winner:
             continue
 
-        # stage 4: log events + simulate outcome
         w      = result.winner
         imp_id = event_log.log_impression(w.ad.id, query)
         served += 1
@@ -180,19 +118,12 @@ def run_simulation(n_queries: int):
         if converted:
             event_log.log_conversion(imp_id, w.ad.avg_order_value)
 
-        # feedback
         if event_log.total_impressions % FEEDBACK_INTERVAL == 0:
             apply_feedback(ads, event_log)
 
-    # final snapshot
-    take_snapshot(day + 1)
-
     elapsed = time.time() - t0
     print(f"\n  Done in {elapsed:.1f}s  ({n_queries / elapsed:,.0f} queries/s)")
-
-    # ── output ────────────────────────────────────────────────────────────────
     print_stats(ads, event_log)
-    plot_rate_evolution(snapshots, ads)
 
 
 if __name__ == "__main__":
