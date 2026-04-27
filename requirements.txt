@@ -2,3 +2,5 @@ numpy
 matplotlib
 sentence-transformers
 hnswlib
+streamlit
+plotly
