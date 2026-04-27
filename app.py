@@ -18,7 +18,7 @@ from queries import QUERIES
 IMPRESSIONS_PER_DAY = 10_000
 FEEDBACK_INTERVAL   = 1_000
 
-st.set_page_config(page_title="LLM Ad Network", layout="wide", page_icon="📡")
+st.set_page_config(page_title="LLM Ad Network", layout="wide", page_icon="")
 
 
 # ── Cached resources (load once per session) ──────────────────────────────────
@@ -163,7 +163,7 @@ def build_evolution_df(snapshots, ads):
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
-st.title("📡 LLM Ad Network — Simulation Dashboard")
+st.title("LLM Ad Network — Simulation Dashboard")
 st.caption(
     "Second-price auction · HNSW vector matching · target-CPA bidding · Bayesian CTR/CVR feedback"
 )
@@ -275,20 +275,41 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True)
 
     with col_r:
-        scatter_df = stats_df[stats_df["Impressions"] > 0].copy()
-        fig = px.scatter(
-            scatter_df,
-            x="CTR %", y="CVR %",
-            size="Impressions", size_max=55,
-            color="Category",
-            hover_name="Ad",
-            hover_data={"Impressions": True, "CTR %": ":.2f", "CVR %": ":.2f"},
+        scatter_df  = stats_df[stats_df["Impressions"] > 0].copy()
+        max_impr    = scatter_df["Impressions"].max()
+        palette     = px.colors.qualitative.Dark24
+        cats        = scatter_df["Category"].unique().tolist()
+        cat_clr     = {c: palette[i % len(palette)] for i, c in enumerate(cats)}
+
+        fig = go.Figure()
+        for cat in cats:
+            sub = scatter_df[scatter_df["Category"] == cat]
+            fig.add_trace(go.Scatter(
+                x=sub["CTR %"].tolist(),
+                y=sub["CVR %"].tolist(),
+                mode="markers",
+                name=cat,
+                marker=dict(
+                    size=(sub["Impressions"] / max_impr * 45 + 10).tolist(),
+                    color=cat_clr[cat],
+                    opacity=0.75,
+                    line=dict(width=1, color="white"),
+                ),
+                text=sub["Ad"].tolist(),
+                customdata=sub["Impressions"].tolist(),
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "CTR: %{x:.2f}%<br>"
+                    "CVR: %{y:.2f}%<br>"
+                    "Impressions: %{customdata:,}<extra></extra>"
+                ),
+            ))
+        fig.update_layout(
             title="CTR % vs CVR %  (bubble size = impressions)",
-            height=420,
-            color_discrete_sequence=px.colors.qualitative.Safe,
+            xaxis_title="CTR %", yaxis_title="CVR %",
+            legend_title="Category", height=420,
         )
-        fig.update_layout(legend_title="Category")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="scatter_ctr_cvr")
 
 
 # ── Tab 2: Rate Evolution ─────────────────────────────────────────────────────
@@ -297,47 +318,64 @@ with tab2:
     st.caption("Dashed lines show each ad's initial prior rate. Solid lines show how rates shift as the Bayesian feedback loop accumulates data.")
 
     all_ad_names = sorted(evo_df["Ad"].unique().tolist())
+    name_to_ad   = {ad.name: ad for ad in ads}
 
     col_metric, col_filter = st.columns([1, 3])
     with col_metric:
-        metric = st.radio("Metric", ["CTR %", "CVR %"],
-                          key="evo_metric", horizontal=False)
+        metric = st.radio("Metric", ["CTR %", "CVR %"], horizontal=False)
     with col_filter:
+        # Pre-populate on first render after a new simulation run
+        if "evo_selected_ads" not in st.session_state or not st.session_state.get("evo_selected_ads"):
+            st.session_state["evo_selected_ads"] = all_ad_names
         selected = st.multiselect(
-            "Filter ads (all shown by default)",
+            "Filter ads",
             options=all_ad_names,
-            default=all_ad_names,
             key="evo_selected_ads",
         )
 
     if not selected:
         st.info("Select at least one ad above.")
     else:
-        filtered = evo_df[evo_df["Ad"].isin(selected)]
-        name_to_ad = {ad.name: ad for ad in ads}
+        palette24  = px.colors.qualitative.Dark24
+        ad_colors  = {name: palette24[i % len(palette24)] for i, name in enumerate(all_ad_names)}
 
-        # Tight y-axis zoom so small Bayesian drift is visible
-        y_vals  = filtered[metric].dropna()
-        y_pad   = max((y_vals.max() - y_vals.min()) * 0.3, 0.05)
-        y_range = [max(0, y_vals.min() - y_pad), y_vals.max() + y_pad]
+        # Build chart using go.Figure for reliable rendering
+        fig = go.Figure()
+        all_y = []
+        for ad_name in selected:
+            sub = evo_df[evo_df["Ad"] == ad_name].sort_values("Day")
+            if sub.empty:
+                continue
+            y_vals = sub[metric].tolist()
+            all_y.extend(y_vals)
+            fig.add_trace(go.Scatter(
+                x=sub["Day"].tolist(),
+                y=y_vals,
+                mode="lines",
+                name=ad_name,
+                line=dict(color=ad_colors[ad_name], width=2),
+                hovertemplate=f"<b>{ad_name}</b><br>Day %{{x}}<br>{metric}: %{{y:.3f}}<extra></extra>",
+            ))
 
-        fig = px.line(
-            filtered, x="Day", y=metric, color="Ad",
-            title=f"{metric} evolution over simulated days",
-            height=520,
-            color_discrete_sequence=px.colors.qualitative.Alphabet,
-        )
+        # Dashed reference lines at init rate
         for ad_name in selected:
             ad = name_to_ad.get(ad_name)
             if ad:
                 init_val = (ad._init_ctr if metric == "CTR %" else ad._init_cvr) * 100
-                fig.add_hline(y=init_val, line_dash="dash", line_color="gray",
-                              opacity=0.3)
+                fig.add_hline(y=init_val, line_dash="dash", line_color="lightgray", opacity=0.6)
+
+        # Tight y-axis so small drift is visible
+        if all_y:
+            y_min, y_max = min(all_y), max(all_y)
+            y_pad = max((y_max - y_min) * 0.3, 0.05)
+            fig.update_yaxes(range=[max(0, y_min - y_pad), y_max + y_pad])
+
         fig.update_layout(
-            legend_title="Ad",
-            yaxis=dict(range=y_range, title=metric),
+            title=f"{metric} evolution over simulated days",
+            xaxis_title="Day", yaxis_title=metric,
+            legend_title="Ad", height=540,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="evo_line_chart")
 
 
 # ── Tab 3: Budget & Spend ─────────────────────────────────────────────────────
