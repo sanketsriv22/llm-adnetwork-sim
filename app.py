@@ -253,13 +253,15 @@ with tab1:
     col_l, col_r = st.columns(2)
 
     with col_l:
+        palette   = px.colors.qualitative.Safe
+        cats      = list(stats_df["Category"].unique())
+        cat_color = {cat: palette[i % len(palette)] for i, cat in enumerate(cats)}
+        bar_colors = [cat_color[c] for c in stats_df["Category"]]
+
         fig = go.Figure(go.Bar(
             x=stats_df["Ad"].tolist(),
             y=stats_df["Impressions"].tolist(),
-            marker_color=px.colors.qualitative.Safe[
-                [list(stats_df["Category"].unique()).index(c) % len(px.colors.qualitative.Safe)
-                 for c in stats_df["Category"]]
-            ],
+            marker_color=bar_colors,
             text=stats_df["Impressions"].apply(lambda v: f"{v:,}"),
             textposition="outside",
         ))
